@@ -15,8 +15,10 @@ const workspaceRoot = join(runRoot, "workspace");
 const outsideRoot = join(runRoot, "outside");
 const outsideMarker = `outside-${randomUUID()}`;
 await mkdir(join(workspaceRoot, ".ai-handoff"), { recursive: true });
+await mkdir(join(workspaceRoot, "nested"), { recursive: true });
 await mkdir(outsideRoot, { recursive: true });
-await writeFile(join(workspaceRoot, "inside.txt"), "inside marker\n", "utf8");
+await writeFile(join(workspaceRoot, "inside.txt"), "inside marker\nsecond line\n", "utf8");
+await writeFile(join(workspaceRoot, "nested", "AGENTS.md"), "# Nested instructions\n", "utf8");
 await writeFile(join(outsideRoot, "outside.txt"), outsideMarker, "utf8");
 await writeFile(join(workspaceRoot, ".ai-handoff", "NEXT_TASK.md"), "next\n", "utf8");
 await writeFile(join(workspaceRoot, ".ai-handoff", "REVIEW.md"), "review\n", "utf8");
@@ -58,7 +60,10 @@ try {
   assert.ok(!listed.tools.some((tool) => /shell|process|git|edit|delete|patch|artifact|worktree|skill|subagent/i.test(tool.name)));
   const opened = structured(await readOnly.client.callTool({ name: "open_workspace", arguments: { path: workspaceRoot } }));
   const workspaceId = String(opened.workspaceId);
-  assert.equal(structured(await readOnly.client.callTool({ name: "read_file", arguments: { workspaceId, path: "inside.txt" } })).result, "inside marker\n");
+  assert.equal(structured(await readOnly.client.callTool({ name: "read_file", arguments: { workspaceId, path: "inside.txt" } })).result, "inside marker\nsecond line\n");
+  assert.equal(structured(await readOnly.client.callTool({ name: "read_file", arguments: { workspaceId, path: "inside.txt", startLine: 2, endLine: 2 } })).result, "second line");
+  const instructions = String(structured(await readOnly.client.callTool({ name: "list_files", arguments: { workspaceId, mode: "instructions" } })).result);
+  assert.match(instructions, /nested\/AGENTS\.md/);
   for (const path of ["../outside/outside.txt", join(outsideRoot, "outside.txt"), "escape/outside.txt", ".ai-handoff/RESULT.md"]) {
     const result = await readOnly.client.callTool({ name: "read_file", arguments: { workspaceId, path } });
     if (path.endsWith("RESULT.md")) assert.equal(result.isError, undefined);
@@ -86,10 +91,24 @@ try {
   const workspaceId = String(opened.workspaceId);
   await handoff.client.callTool({ name: "write_review", arguments: { workspaceId, content: "new review\n", destination: "../outside.txt" } });
   await handoff.client.callTool({ name: "write_next_task", arguments: { workspaceId, content: "new task\n", path: ".ai-handoff/RESULT.md" } });
-  await handoff.client.callTool({ name: "update_handoff_state", arguments: { workspaceId, content: '{"phase":"ready_for_review"}', filename: "outside.json" } });
+
+  const invalidState = await handoff.client.callTool({ name: "update_handoff_state", arguments: { workspaceId, content: '{"phase":"ready_for_review"}' } });
+  assert.equal(invalidState.isError, true, "incomplete handoff state must be rejected");
+
+  const validState = JSON.stringify({
+    schemaVersion: 1,
+    cycle: 1,
+    phase: "ready_for_review",
+    lastWriter: "implementer",
+    nextTaskStatus: "complete",
+    resultStatus: "complete",
+    reviewStatus: "pending",
+    repositoryRevision: null,
+  });
+  await handoff.client.callTool({ name: "update_handoff_state", arguments: { workspaceId, content: validState, filename: "outside.json" } });
   assert.equal(await readFile(join(workspaceRoot, ".ai-handoff", "REVIEW.md"), "utf8"), "new review\n");
   assert.equal(await readFile(join(workspaceRoot, ".ai-handoff", "NEXT_TASK.md"), "utf8"), "new task\n");
-  assert.equal(await readFile(join(workspaceRoot, ".ai-handoff", "STATE.json"), "utf8"), '{\n  "phase": "ready_for_review"\n}\n');
+  assert.deepEqual(JSON.parse(await readFile(join(workspaceRoot, ".ai-handoff", "STATE.json"), "utf8")), JSON.parse(validState));
   assert.equal(await readFile(join(workspaceRoot, ".ai-handoff", "RESULT.md"), "utf8"), "implementer result\n");
   assert.equal(await readFile(join(outsideRoot, "outside.txt"), "utf8"), outsideMarker);
 } finally {

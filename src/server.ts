@@ -9,9 +9,11 @@ import type { Express, NextFunction, Request, Response } from "express";
 import { hostHeaderValidation } from "@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js";
 import * as z from "zod/v4";
 import { assertRepoRelaySafety, loadConfig, type ServerConfig } from "./config.js";
+import { validateAndNormalizeHandoffState } from "./handoff-state.js";
 import { logEvent, requestIp, requestPath, sessionIdPrefix } from "./logger.js";
 import { McpSessionRegistry, type McpSessionCloseResult } from "./mcp-sessions.js";
-import { listReviewDirectory, readReviewTextFile, searchReviewFiles, writeHandoffDocument } from "./review-files.js";
+import { findReviewInstructionFiles, listReviewDirectory, searchReviewFiles, writeHandoffDocument } from "./review-files.js";
+import { readReviewTextRange } from "./review-output.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 
 type Transport = StreamableHTTPServerTransport;
@@ -70,16 +72,21 @@ export function registerRepoRelayTools(
     "list_files",
     {
       title: "List repository files",
-      description: "List a real directory inside the opened repository. Links and junctions are reported as blocked.",
+      description: "List a real directory or recursively discover repository instruction files. Links and junctions remain blocked.",
       inputSchema: {
         workspaceId: z.string(),
-        path: z.string().optional().describe("Repository-relative directory path. Defaults to the root."),
+        path: z.string().optional().describe("Repository-relative directory path. Defaults to the root in directory mode."),
+        mode: z.enum(["directory", "instructions"]).optional().describe("Use instructions to recursively discover AGENTS.md and CLAUDE.md files."),
       },
       outputSchema: toolOutputSchema(),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async ({ workspaceId, path }) => {
+    async ({ workspaceId, path, mode }) => {
       const workspace = workspaces.getWorkspace(workspaceId);
+      if (mode === "instructions") {
+        const files = await findReviewInstructionFiles(workspace.root);
+        return textResult(files.join("\n") || "No AGENTS.md or CLAUDE.md instruction files found.");
+      }
       const entries = await listReviewDirectory(workspace.root, path ?? ".");
       return textResult(entries.map((entry) => `${entry.type}\t${entry.path}`).join("\n") || "Directory is empty.");
     },
@@ -89,17 +96,20 @@ export function registerRepoRelayTools(
     "read_file",
     {
       title: "Read repository file",
-      description: "Read one regular, non-sensitive file whose canonical target remains inside the opened repository.",
+      description: "Read one regular, non-sensitive file with bounded output. Optional line ranges keep large reviews context-efficient.",
       inputSchema: {
         workspaceId: z.string(),
         path: z.string().describe("Repository-relative file path."),
+        startLine: z.number().int().min(1).optional().describe("Optional 1-based first line to return."),
+        endLine: z.number().int().min(1).optional().describe("Optional 1-based final line to return."),
+        maxBytes: z.number().int().min(1_024).max(256 * 1_024).optional().describe("Maximum output bytes. Defaults to 64 KiB."),
       },
       outputSchema: toolOutputSchema(),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async ({ workspaceId, path }) => {
+    async ({ workspaceId, path, startLine, endLine, maxBytes }) => {
       const workspace = workspaces.getWorkspace(workspaceId);
-      return textResult(await readReviewTextFile(workspace.root, path));
+      return textResult(await readReviewTextRange(workspace.root, path, { startLine, endLine, maxBytes }));
     },
   );
 
@@ -146,7 +156,8 @@ export function registerRepoRelayTools(
       },
       async ({ workspaceId, content }) => {
         const workspace = workspaces.getWorkspace(workspaceId);
-        return textResult(`Updated ${await writeHandoffDocument(workspace.root, document, content)}.`);
+        const validatedContent = document === "state" ? validateAndNormalizeHandoffState(content) : content;
+        return textResult(`Updated ${await writeHandoffDocument(workspace.root, document, validatedContent)}.`);
       },
     );
   };
@@ -166,7 +177,7 @@ export function registerRepoRelayTools(
   registerFixedWriter(
     "update_handoff_state",
     "Update handoff state",
-    "Replace only .ai-handoff/STATE.json with a valid JSON object. This tool has no destination-path parameter.",
+    "Replace only .ai-handoff/STATE.json with schemaVersion, cycle, phase, writer and status fields. This tool has no destination-path parameter.",
     "state",
   );
 }
@@ -181,8 +192,8 @@ function createMcpServer(config: ServerConfig, workspaces: WorkspaceRegistry): M
     },
     {
       instructions: config.handoffWritesEnabled
-        ? "Use RepoRelay to inspect the one approved repository. Call open_workspace once, then use list_files, read_file, and search_files. The only writes available are fixed-target updates to NEXT_TASK.md, REVIEW.md, and STATE.json under .ai-handoff; there is no shell, process, Git, edit, patch, artifact, worktree, skill, subagent, or unrestricted filesystem capability."
-        : "Use RepoRelay to inspect the one approved repository. Call open_workspace once, then use list_files, read_file, and search_files. This connection is read-only; there is no shell, process, Git, edit, patch, artifact, worktree, skill, subagent, or unrestricted filesystem capability.",
+        ? "Use RepoRelay to inspect the one approved repository. Call open_workspace once. Use list_files with mode=instructions before reviewing a subtree, use bounded read_file ranges for large files, and use search_files for literal code search. The only writes available are fixed-target updates to NEXT_TASK.md, REVIEW.md, and schema-validated STATE.json under .ai-handoff; there is no shell, process, Git, edit, patch, artifact, worktree, skill, subagent, or unrestricted filesystem capability."
+        : "Use RepoRelay to inspect the one approved repository. Call open_workspace once. Use list_files with mode=instructions before reviewing a subtree, bounded read_file ranges for large files, and search_files for literal code search. This connection is read-only; there is no shell, process, Git, edit, patch, artifact, worktree, skill, subagent, or unrestricted filesystem capability.",
     },
   );
   registerRepoRelayTools(server, config, workspaces);

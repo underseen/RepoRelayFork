@@ -16,6 +16,7 @@ Use ChatGPT as a constrained repository reviewer while a separate local coding a
 - Keep `RESULT.md` implementer-owned.
 - Validate structured state before accepting reviewer state changes.
 - Prefer bounded/ranged reads so repository review does not waste model context.
+- Verify both service identity and bridge authentication before declaring tunnel health.
 
 ## Personal reviewer flow
 
@@ -34,12 +35,21 @@ The handoff protocol never authorizes deployment, publishing, destructive operat
 
 A future executor integration should enforce a separate approval artifact or control-plane decision before consuming a new `NEXT_TASK.md`; do not treat text written by the reviewer as equivalent to operator approval.
 
+## Foundation implemented on the personal fork
+
+- Quickstart rejects a redirected `.ai-handoff` directory before initialization.
+- Reviewer-facing reads are bounded to 64 KiB by default and support line ranges.
+- `list_files(mode="instructions")` discovers nested `AGENTS.md` and `CLAUDE.md` files without adding another MCP capability.
+- Reviewer updates to `STATE.json` must match the structured handoff schema.
+- Handoff documents use same-directory temporary files, sync, revalidation, and atomic replacement instead of truncate-then-write.
+- `tunnel doctor` validates the expected RepoRelay `/healthz` identity and then exercises the authenticated MCP endpoint; a generic non-401 HTTP service is not considered healthy.
+
 ## Near-term roadmap
 
 ### P0
 
-- Harden bridge identity verification in `tunnel doctor` so success proves the endpoint is the expected authenticated RepoRelay MCP server, not merely a non-401 HTTP service.
-- Add an explicit approval artifact/state for executor consumption.
+- Add an explicit operator-owned approval artifact/state for executor consumption, bound to the exact task cycle/content.
+- Validate the foundation across the existing Linux, macOS, and Windows CI matrix before merging it into `main`.
 
 ### P1
 

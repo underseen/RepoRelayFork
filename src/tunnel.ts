@@ -339,9 +339,9 @@ async function performDoctorChecks(
   const credential = await verifyRuntimeCredential(options.tunnelClientPath, paths, config.tunnelId, run);
   if (!credential.passed) return { passed: false, diagnostics: credential.diagnostics, exitCode: 2 };
 
-  // tunnel-client doctor treats an HTTP 401 from the MCP origin as
-  // "reachable"; it never exercises the profile's bridge secret. Probe the
-  // running RepoRelay with the configured secret so auth is verified too.
+  // Verify both the RepoRelay service identity and the configured secret.
+  // A random service that merely returns something other than 401 is not
+  // sufficient evidence that the expected local security boundary is running.
   const bridge = await verifyBridgeAuthentication(config.localMcpUrl ?? DEFAULT_REPORELAY_MCP_URL, paths.bridgeSecretFile, options.fetchImpl);
   if (!bridge.passed) return { passed: false, diagnostics: bridge.diagnostics, exitCode: 2 };
 
@@ -375,11 +375,27 @@ async function verifyRuntimeCredential(
   return { passed: false, diagnostics: "Network error while contacting the OpenAI control plane." };
 }
 
+function bridgeHealthUrl(localMcpUrl: string): string {
+  const url = new URL(localMcpUrl);
+  url.pathname = "/healthz";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function isRepoRelayHealth(value: unknown): boolean {
+  return typeof value === "object"
+    && value !== null
+    && "ok" in value
+    && (value as { ok?: unknown }).ok === true
+    && "name" in value
+    && (value as { name?: unknown }).name === "reporelay";
+}
+
 /**
- * Verifies the configured bridge secret against the RepoRelay that is actually
- * running: probes the local MCP endpoint with the secret from the protected
- * file. A 401 means the running RepoRelay uses a different secret; a network
- * failure means it is not running at the configured endpoint.
+ * Proves that the configured local endpoint is the expected RepoRelay service
+ * and that it accepts the protected bridge secret. Identity is anchored by the
+ * exact /healthz response and authentication is then exercised against /mcp.
  */
 async function verifyBridgeAuthentication(
   localMcpUrl: string,
@@ -389,12 +405,37 @@ async function verifyBridgeAuthentication(
   const secret = (await readFile(bridgeSecretFile, "utf8")).trim();
   if (!secret) return { passed: false, diagnostics: "The RepoRelay bridge secret is empty." };
   try {
+    const healthResponse = await fetchImpl(bridgeHealthUrl(localMcpUrl), {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (healthResponse.status !== 200) {
+      return { passed: false, diagnostics: `Bridge identity verification failed: /healthz returned HTTP ${healthResponse.status}.` };
+    }
+
+    let healthPayload: unknown;
+    try {
+      healthPayload = await healthResponse.json();
+    } catch {
+      return { passed: false, diagnostics: "Bridge identity verification failed: /healthz did not return JSON." };
+    }
+    if (!isRepoRelayHealth(healthPayload)) {
+      return { passed: false, diagnostics: "Bridge identity verification failed: /healthz is not the expected RepoRelay identity." };
+    }
+
     const response = await fetchImpl(localMcpUrl, {
       headers: { "X-RepoRelay-Bridge-Secret": secret },
       signal: AbortSignal.timeout(5_000),
     });
     if (response.status === 401) {
       return { passed: false, diagnostics: "The running RepoRelay rejected the configured bridge secret (HTTP 401)." };
+    }
+
+    const body = await response.text();
+    if (response.status !== 400 || !body.includes("No valid MCP session")) {
+      return {
+        passed: false,
+        diagnostics: `Bridge identity verification failed: authenticated MCP probe returned HTTP ${response.status} without the expected RepoRelay session response.`,
+      };
     }
     return { passed: true, diagnostics: "" };
   } catch {

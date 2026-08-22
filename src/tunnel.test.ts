@@ -28,7 +28,26 @@ import {
 const fixtureRoot = await mkdtemp(join(tmpdir(), "reporelay-tunnel-test-"));
 
 const okRunCommand = async (): Promise<TunnelClientCommandResult> => ({ exitCode: 0, stdout: "doctor passed", stderr: "" });
-const okFetch = async () => ({ status: 200 }) as Response;
+const okFetch: typeof fetch = async (input) => {
+  const url = new URL(input instanceof Request ? input.url : input.toString());
+  if (url.pathname === "/healthz") {
+    return new Response(JSON.stringify({ ok: true, name: "reporelay" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  if (url.pathname === "/mcp") {
+    return new Response(JSON.stringify({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "No valid MCP session" },
+      id: null,
+    }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  return new Response(null, { status: 404 });
+};
 
 // ---- Synthetic host-artifact archive ---------------------------------------
 
@@ -470,10 +489,48 @@ const bridgeMismatchResult = await setupTunnel({
   download: async () => hostArchive.zip,
   verify: verifyAgainstArchive,
   runCommand: okRunCommand,
-  fetchImpl: async () => ({ status: 401 }) as Response,
+  fetchImpl: async (input) => {
+    const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.pathname === "/healthz") {
+      return new Response(JSON.stringify({ ok: true, name: "reporelay" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({
+      jsonrpc: "2.0",
+      error: { code: -32001, message: "Unauthorized" },
+      id: null,
+    }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+  },
 });
 assert.equal(bridgeMismatchResult.doctorPassed, false, "a 401 from the running RepoRelay must fail the connection test");
 assert.ok(bridgeMismatchOutput.some((line) => line.includes("Bridge authentication failed")));
+
+const impostorRoot = join(fixtureRoot, "bridge-impostor");
+const impostorEnv = { ...process.env, REPORELAY_CONFIG_DIR: impostorRoot };
+const impostorPaths = getTunnelPaths(impostorEnv);
+await ensureQuickstartBridgeSecret(impostorPaths.bridgeSecretFile);
+const impostorOutput: string[] = [];
+const impostorResult = await setupTunnel({
+  env: impostorEnv,
+  tunnelId,
+  runtimeApiKey,
+  interactive: false,
+  output: (line) => impostorOutput.push(line),
+  download: async () => hostArchive.zip,
+  verify: verifyAgainstArchive,
+  runCommand: okRunCommand,
+  fetchImpl: async () => new Response(JSON.stringify({ ok: true, name: "not-reporelay" }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  }),
+});
+assert.equal(impostorResult.doctorPassed, false, "a non-RepoRelay HTTP service must never satisfy the bridge doctor");
+assert.ok(impostorOutput.some((line) => line.includes("Bridge authentication failed")));
 
 const bridgeDownRoot = join(fixtureRoot, "bridge-down");
 const bridgeDownEnv = { ...process.env, REPORELAY_CONFIG_DIR: bridgeDownRoot };

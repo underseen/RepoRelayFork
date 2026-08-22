@@ -121,12 +121,26 @@ function assertRegularFileIfPresent(path: string): boolean {
   return true;
 }
 
+function assertRealDirectory(path: string, label: string): void {
+  const stats = lstatSync(path);
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error(`${label} must be a real directory, not a link or junction: ${path}`);
+  }
+}
+
 export async function initializeHandoffFiles(repositoryRoot: string, options: { appendAgentInstructions?: boolean } = {}): Promise<HandoffInitResult> {
   const handoffDirectory = join(repositoryRoot, ".ai-handoff");
   await mkdir(handoffDirectory, { recursive: true });
+  assertRealDirectory(handoffDirectory, "RepoRelay handoff directory");
+
   const created: string[] = [];
   const preserved: string[] = [];
   for (const template of handoffTemplates()) {
+    // Re-check the parent immediately before each mutation. This closes the
+    // quickstart redirect gap where a pre-existing .ai-handoff symlink or
+    // Windows junction could otherwise send fixed handoff writes outside the
+    // approved repository.
+    assertRealDirectory(handoffDirectory, "RepoRelay handoff directory");
     const target = join(handoffDirectory, template.name);
     const relativePath = `.ai-handoff/${template.name}`;
     if (assertRegularFileIfPresent(target)) preserved.push(relativePath);

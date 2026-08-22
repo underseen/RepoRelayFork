@@ -1,5 +1,6 @@
-import { open, lstat, realpath, readdir } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { randomUUID } from "node:crypto";
+import { open, lstat, realpath, readdir, rename, rm } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { expandHomePath } from "./roots.js";
 
 const MAX_READ_BYTES = 1024 * 1024;
@@ -219,14 +220,45 @@ export async function writeHandoffDocument(
 
   const normalizedContent = document === "state" ? normalizeStateJson(content) : content;
   const safePath = await resolveReviewExistingPath(workspaceRoot, relativePath, "file");
-  const handle = await open(safePath.absolutePath, "r+");
+  const parentRelativePath = toWorkspacePath(dirname(relativePath));
+  const safeParent = await resolveReviewExistingPath(workspaceRoot, parentRelativePath, "directory");
+  if (!samePath(dirname(safePath.absolutePath), safeParent.absolutePath)) {
+    throw new ReviewAccessDeniedError("Handoff target parent changed during the operation.");
+  }
+
+  const targetHandle = await open(safePath.absolutePath, "r");
   try {
-    await verifyOpenHandle(workspaceRoot, relativePath, safePath, handle);
-    await handle.truncate(0);
-    await handle.writeFile(normalizedContent, { encoding: "utf8" });
-    await handle.sync();
+    await verifyOpenHandle(workspaceRoot, relativePath, safePath, targetHandle);
   } finally {
-    await handle.close();
+    await targetHandle.close();
+  }
+
+  const tempPath = join(safeParent.absolutePath, `.reporelay-${basename(relativePath)}-${randomUUID()}.tmp`);
+  let tempCreated = false;
+  try {
+    const tempHandle = await open(tempPath, "wx", safePath.stats.mode & 0o777);
+    tempCreated = true;
+    try {
+      await tempHandle.writeFile(normalizedContent, { encoding: "utf8" });
+      await tempHandle.sync();
+    } finally {
+      await tempHandle.close();
+    }
+
+    // Re-validate the destination immediately before the atomic replacement.
+    const currentTarget = await resolveReviewExistingPath(workspaceRoot, relativePath, "file");
+    if (
+      !samePath(currentTarget.absolutePath, safePath.absolutePath)
+      || currentTarget.stats.dev !== safePath.stats.dev
+      || currentTarget.stats.ino !== safePath.stats.ino
+    ) {
+      throw new ReviewAccessDeniedError("Handoff target identity changed before replacement.");
+    }
+
+    await rename(tempPath, safePath.absolutePath);
+    tempCreated = false;
+  } finally {
+    if (tempCreated) await rm(tempPath, { force: true }).catch(() => undefined);
   }
 
   return relativePath;

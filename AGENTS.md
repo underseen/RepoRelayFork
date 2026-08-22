@@ -15,9 +15,24 @@ Preserve these invariants in every change:
 - never register shell, process, Git, arbitrary mutation, worktree, artifact,
   skill, subagent, or widget tools in the review profile.
 
-Before changing code, read `README.md`, `SECURITY.md`, `package.json`, and the
-nearby tests. Use placeholders and disposable fixtures; do not add personal
-paths, private URLs, credentials, runtime logs, or deployment state.
+Before changing code, read `README.md`, `SECURITY.md`, `package.json`,
+`docs/PERSONAL_FORK.md`, and the nearby tests. Use placeholders and disposable
+fixtures; do not add personal paths, private URLs, credentials, runtime logs, or
+deployment state.
+
+## Personal fork priorities
+
+- Optimize for a ChatGPT reviewer + separate local implementer workflow.
+- Preserve reviewer/executor permission separation rather than adding execution
+  convenience to the reviewer MCP surface.
+- Discover nested repository instructions with `list_files` mode `instructions`
+  before broad review.
+- Prefer ranged `read_file` calls for large files and keep model-facing output
+  bounded.
+- Treat `STATE.json` as structured protocol state, not arbitrary scratch JSON.
+- Use crash-safe atomic replacement for handoff documents.
+- Any future executor integration must keep explicit operator approval separate
+  from reviewer-written task text.
 
 Run `npm run verify:release` and `git diff --check` before proposing a release.
 Do not weaken a containment check to accommodate a failing fixture.
